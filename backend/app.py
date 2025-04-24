@@ -33,6 +33,10 @@ def clean_youtube_url(url: str) -> str:
         return url.split("&")[0]
     return url
 
+@app.route('/')
+def home():
+    return 'Service is up and running!'
+
 @app.route('/video-info', methods=['POST'])
 def video_info():
     try:
