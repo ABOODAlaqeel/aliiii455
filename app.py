@@ -1,9 +1,9 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import yt_dlp
 import os
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='temp_downloads', static_url_path='/static')
 CORS(app)
 
 # مسار ملف الكوكيز
@@ -22,19 +22,6 @@ common_ydl_opts = {
     }
 }
 
-# المسار الجذري - للتأكد أن التطبيق يعمل
-@app.route('/')
-def home():
-    return jsonify({
-        "message": "YouTube Video Info API is running ✅",
-        "endpoints": {
-            "POST /video-info": "Get video info",
-            "GET /download-video": "Download video",
-            "GET /download-audio": "Download audio",
-            "GET /download-subtitle": "Download subtitle"
-        }
-    })
-
 # تنظيف رابط اليوتيوب
 def clean_youtube_url(url: str) -> str:
     if "youtu.be" in url:
@@ -44,6 +31,13 @@ def clean_youtube_url(url: str) -> str:
         return url.split("&")[0]
     return url
 
+# المسار الرئيسي
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        'message': 'مرحباً بك في YouTube-DL API. استخدم /video-info للحصول على معلومات الفيديو.'
+    })
+
 # معالجات الأخطاء
 @app.errorhandler(400)
 def bad_request(err):
@@ -51,7 +45,7 @@ def bad_request(err):
 
 @app.errorhandler(404)
 def not_found(err):
-    return jsonify({'error': 'The requested URL was not found on the server.'}), 404
+    return jsonify({'error': err.description}), 404
 
 # جلب معلومات الفيديو
 @app.route('/video-info', methods=['POST'])
@@ -59,7 +53,7 @@ def video_info():
     data = request.get_json() or {}
     url = data.get('url')
     if not url:
-        return jsonify({'error': 'Missing \"url\"'}), 400
+        return jsonify({'error': 'Missing "url"'}), 400
 
     url = clean_youtube_url(url)
     opts = {
@@ -263,4 +257,5 @@ def download_subtitle():
 
 # تشغيل التطبيق
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=10000)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(debug=True, host='0.0.0.0', port=port)
