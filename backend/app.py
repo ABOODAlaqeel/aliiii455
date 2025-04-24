@@ -1,9 +1,9 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import yt_dlp
 import os
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='temp_downloads', static_url_path='/static')
 CORS(app)
 
 # مسار ملف الكوكيز
@@ -30,6 +30,13 @@ def clean_youtube_url(url: str) -> str:
     if "youtube.com" in url:
         return url.split("&")[0]
     return url
+
+# المسار الرئيسي
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        'message': 'مرحباً بك في YouTube-DL API. استخدم /video-info للحصول على معلومات الفيديو.'
+    })
 
 # معالجات الأخطاء
 @app.errorhandler(400)
@@ -95,7 +102,6 @@ def video_info():
                     'merged': False
                 })
 
-        # دمج فيديو وصوت يدويًا
         for vf in video_only:
             af = next((a for a in audio_only if a['ext'] == 'm4a'), None)
             if af:
@@ -251,4 +257,5 @@ def download_subtitle():
 
 # تشغيل التطبيق
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=10000)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(debug=True, host='0.0.0.0', port=port)
