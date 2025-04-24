@@ -1,7 +1,6 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
 from flask_cors import CORS
-import yt_dlp
-import os
+import yt_dlp, requests, os
 
 app = Flask(__name__, static_folder='temp_downloads', static_url_path='/static')
 CORS(app)
@@ -22,7 +21,6 @@ common_ydl_opts = {
     }
 }
 
-# تنظيف رابط اليوتيوب
 def clean_youtube_url(url: str) -> str:
     if "youtu.be" in url:
         vid = url.rsplit("/", 1)[-1].split("?")[0]
@@ -31,23 +29,15 @@ def clean_youtube_url(url: str) -> str:
         return url.split("&")[0]
     return url
 
-# المسار الرئيسي
 @app.route('/', methods=['GET'])
 def index():
-    return jsonify({
-        'message': 'مرحباً بك في YouTube-DL API. استخدم /video-info للحصول على معلومات الفيديو.'
-    })
+    return jsonify({'message': 'مرحباً بك في YouTube-DL API. استخدم /video-info.'})
 
-# معالجات الأخطاء
 @app.errorhandler(400)
-def bad_request(err):
-    return jsonify({'error': err.description}), 400
-
+def bad_request(err): return jsonify({'error': err.description}), 400
 @app.errorhandler(404)
-def not_found(err):
-    return jsonify({'error': err.description}), 404
+def not_found(err):    return jsonify({'error': err.description}), 404
 
-# جلب معلومات الفيديو
 @app.route('/video-info', methods=['POST'])
 def video_info():
     data = request.get_json() or {}
@@ -74,34 +64,24 @@ def video_info():
         for f in info['formats']:
             has_audio = f.get('acodec') != 'none'
             has_video = f.get('vcodec') != 'none'
+            entry = {
+                'format_id': f['format_id'],
+                'ext': f['ext'],
+                'resolution': f.get('height'),
+                'filesize': f.get('filesize'),
+                'merged': False
+            }
             if has_audio and has_video:
-                formats.append({
-                    'format_id': f['format_id'],
-                    'ext': f['ext'],
-                    'resolution': f.get('height'),
-                    'filesize': f.get('filesize'),
-                    'type': 'video+audio',
-                    'merged': False
-                })
+                entry['type'] = 'video+audio'
             elif has_video:
-                formats.append({
-                    'format_id': f['format_id'],
-                    'ext': f['ext'],
-                    'resolution': f.get('height'),
-                    'filesize': f.get('filesize'),
-                    'type': 'video-only',
-                    'merged': False
-                })
+                entry['type'] = 'video-only'
             elif has_audio:
-                formats.append({
-                    'format_id': f['format_id'],
-                    'ext': f['ext'],
-                    'resolution': None,
-                    'filesize': f.get('filesize'),
-                    'type': 'audio-only',
-                    'merged': False
-                })
+                entry['type'] = 'audio-only'
+            else:
+                continue
+            formats.append(entry)
 
+        # إضافة صيغ مدموجة يدوياً (video-only + audio-only)
         for vf in video_only:
             af = next((a for a in audio_only if a['ext'] == 'm4a'), None)
             if af:
@@ -114,6 +94,7 @@ def video_info():
                     'merged': True
                 })
 
+        # التراجم اليدوية
         subtitles = []
         for lang, subs in info.get('subtitles', {}).items():
             for sub in subs:
@@ -123,6 +104,7 @@ def video_info():
                     'url': sub.get('url'),
                 })
 
+        # التراجم الآلية
         automatic_subtitles = []
         for lang, subs in info.get('automatic_captions', {}).items():
             for sub in subs:
@@ -145,117 +127,88 @@ def video_info():
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
-# تحميل الفيديو
+def stream_url(url, filename):
+    """Proxy streaming helper"""
+    r = requests.get(url, stream=True)
+    headers = {
+        'Content-Disposition': f'attachment; filename="{filename}"'
+    }
+    return Response(
+        stream_with_context(r.iter_content(chunk_size=8192)),
+        headers=headers,
+        content_type=r.headers.get('Content-Type', 'application/octet-stream')
+    )
+
 @app.route('/download-video', methods=['GET'])
 def download_video():
-    url = request.args.get('url')
-    fmt = request.args.get('format_id')
+    url    = request.args.get('url')
+    fmt    = request.args.get('format_id')
     merged = request.args.get('merged', 'false').lower() == 'true'
     if not url or not fmt:
-        return jsonify({'error': 'Missing "url" or "format_id"'}), 400
+        return jsonify({'error':'Missing "url" or "format_id"'}),400
 
     url = clean_youtube_url(url)
+    with yt_dlp.YoutubeDL(common_ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
 
-    try:
-        with yt_dlp.YoutubeDL(common_ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    if merged and '+' in fmt:
+        vf_id, af_id = fmt.split('+')
+        vf = next(f for f in info['formats'] if f['format_id'] == vf_id)
+        af = next(f for f in info['formats'] if f['format_id'] == af_id)
+        temp_dir = 'temp_downloads'
+        os.makedirs(temp_dir, exist_ok=True)
+        output = os.path.join(temp_dir, f"{info.get('id')}_merged.mp4")
+        os.system(f'ffmpeg -y -i "{vf["url"]}" -i "{af["url"]}" -c:v copy -c:a aac "{output}"')
+        return send_from_directory(temp_dir, os.path.basename(output), as_attachment=True)
+    else:
+        entry = next((f for f in info['formats'] if f['format_id'] == fmt), None)
+        if not entry or not entry.get('url'):
+            return jsonify({'error':'Format not found'}),404
+        filename = f"{info.get('title')}.{entry['ext']}"
+        return stream_url(entry['url'], filename)
 
-        if merged and '+' in fmt:
-            vf_id, af_id = fmt.split('+')
-            vf = next(f for f in info['formats'] if f['format_id'] == vf_id)
-            af = next(f for f in info['formats'] if f['format_id'] == af_id)
-
-            temp_dir = 'temp_downloads'
-            os.makedirs(temp_dir, exist_ok=True)
-            video_path = os.path.join(temp_dir, f"video.{vf['ext']}")
-            audio_path = os.path.join(temp_dir, f"audio.{af['ext']}")
-            output_path = os.path.join(temp_dir, f"{info.get('id')}_merged.mp4")
-
-            os.system(f'ffmpeg -y -i "{vf["url"]}" -i "{af["url"]}" -c:v copy -c:a aac "{output_path}"')
-
-            return jsonify({
-                'download_url': f"/static/{os.path.basename(output_path)}",
-                'filename': os.path.basename(output_path),
-                'filesize': os.path.getsize(output_path)
-            })
-        else:
-            entry = next((f for f in info['formats'] if f['format_id'] == fmt), None)
-            if not entry or not entry.get('url'):
-                return jsonify({'error': 'Format not found'}), 404
-
-            filename = f"{info.get('title')}.{entry['ext']}"
-            return jsonify({
-                'download_url': entry['url'],
-                'filename': filename,
-                'filesize': entry.get('filesize')
-            })
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
-
-# تحميل الصوت فقط
 @app.route('/download-audio', methods=['GET'])
 def download_audio():
     url = request.args.get('url')
     if not url:
-        return jsonify({'error': 'Missing "url"'}), 400
+        return jsonify({'error':'Missing "url"'}),400
 
     url = clean_youtube_url(url)
-    opts = {**common_ydl_opts, 'format': 'bestaudio/best', 'skip_download': True}
+    opts = {**common_ydl_opts, 'format':'bestaudio/best','skip_download':True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    entry = next((f for f in info['formats'] if f.get('acodec')!='none'), None)
+    if not entry or not entry.get('url'):
+        return jsonify({'error':'Audio format not found'}),404
+    filename = f"{info.get('title')}.mp3"
+    return stream_url(entry['url'], filename)
 
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        entry = next((f for f in info['formats'] if f.get('acodec') != 'none'), None)
-        if not entry or not entry.get('url'):
-            return jsonify({'error': 'Audio format not found'}), 404
-
-        filename = f"{info.get('title')}.mp3"
-        return jsonify({
-            'download_url': entry['url'],
-            'filename': filename,
-            'filesize': entry.get('filesize')
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
-
-# تحميل الترجمة
 @app.route('/download-subtitle', methods=['GET'])
 def download_subtitle():
-    url = request.args.get('url')
+    url      = request.args.get('url')
     language = request.args.get('language')
-    auto_flag = request.args.get('auto', '0') == '1'
+    auto     = request.args.get('auto','0') == '1'
     if not url or not language:
-        return jsonify({'error': 'Missing "url" or "language"'}), 400
+        return jsonify({'error':'Missing "url" or "language"'}),400
 
     url = clean_youtube_url(url)
     opts = {
         **common_ydl_opts,
         'skip_download': True,
-        'writesubtitles': not auto_flag,
-        'writeautomaticsub': auto_flag
+        'writesubtitles': not auto,
+        'writeautomaticsub': auto
     }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
 
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    subs = info['automatic_captions'] if auto else info['subtitles']
+    tracks = subs.get(language, [])
+    if not tracks:
+        return jsonify({'error':'Subtitle not found'}),404
+    sub = tracks[0]
+    filename = f"{info.get('title')}_{language}{'_auto' if auto else ''}.{sub.get('ext')}"
+    return stream_url(sub.get('url'), filename)
 
-        subs = info['automatic_captions'] if auto_flag else info['subtitles']
-        tracks = subs.get(language, [])
-        if not tracks:
-            return jsonify({'error': 'Subtitle not found'}), 404
-
-        sub = tracks[0]
-        filename = f"{info.get('title')}_{language}{'_auto' if auto_flag else ''}.{sub.get('ext')}"
-        return jsonify({
-            'download_url': sub.get('url'),
-            'filename': filename
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
-
-# تشغيل التطبيق
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(debug=True, host='0.0.0.0', port=port)
