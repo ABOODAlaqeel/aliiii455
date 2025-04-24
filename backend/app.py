@@ -8,7 +8,8 @@ from urllib.parse import quote
 app = Flask(__name__)
 CORS(app)
 
-# إعداد ملف الكوكيز
+YOUTUBE_API_KEY = "AIzaSyAXYR10Sq37htat3WXBa_3Nysw3nhfDEFI"
+
 COOKIE_FILE = os.path.join(os.getcwd(), "cookies.txt")
 if not os.path.exists(COOKIE_FILE):
     open(COOKIE_FILE, "w").close()
@@ -35,7 +36,7 @@ def clean_youtube_url(url: str) -> str:
 
 @app.route('/')
 def home():
-    return 'Service is up and running!'
+    return '🎬 خدمة التنزيل تعمل بكفاءة!'
 
 @app.route('/video-info', methods=['POST'])
 def video_info():
@@ -98,11 +99,24 @@ def stream_url(url, filename, content_type=None):
     r = requests.get(url, stream=True, headers=headers, timeout=30)
     ct = content_type or r.headers.get('Content-Type', 'application/octet-stream')
     dispo = f"attachment; filename*=UTF-8''{quote(filename)}"
-    return Response(
-        stream_with_context(r.iter_content(8192)),
-        headers={'Content-Disposition': dispo},
-        content_type=ct
-    )
+    
+    total_length = r.headers.get('Content-Length')
+    def generate():
+        downloaded = 0
+        for chunk in r.iter_content(8192):
+            if chunk:
+                downloaded += len(chunk)
+                yield chunk
+
+    headers = {
+        'Content-Disposition': dispo,
+        'Content-Type': ct
+    }
+    if total_length:
+        headers['Content-Length'] = total_length
+
+    return Response(stream_with_context(generate()), headers=headers)
+
 
 @app.route('/download-video', methods=['GET'])
 def download_video():
